@@ -64,10 +64,12 @@ if (NOT MSVC)
     "-Wmisleading-indentation"
   )
 endif()
+if (BUILD_SHARED_LIBS)
 target_compile_definitions(espeak-ng PRIVATE "LIBESPEAK_NG_EXPORT=1")
-if (NOT BUILD_SHARED_LIBS)
-  target_compile_definitions(espeak-ng INTERFACE "LIBESPEAK_NG_EXPORT=1")
 endif()
+# if (NOT BUILD_SHARED_LIBS)
+#  target_compile_definitions(espeak-ng INTERFACE "LIBESPEAK_NG_EXPORT=1")
+# endif()
 
 target_compile_definitions(espeak-ng PRIVATE "PATH_ESPEAK_DATA=\"${CMAKE_INSTALL_PREFIX}/share/espeak-ng-data\"")
 
