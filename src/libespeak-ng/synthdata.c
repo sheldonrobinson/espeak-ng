@@ -596,7 +596,12 @@ static bool InterpretCondition(Translator *tr, int control, PHONEME_LIST *plist,
 
 		if (instn2 < 7) {
 			// 'data' is a phoneme number
-			if ((phoneme_tab[data]->mnemonic == ph->mnemonic) == true)
+			// it may not be in the current phoneme table either (same reason as
+			// above), in which case no exact match is possible, but 'data' is
+			// still meaningful as a vowel type below
+			PHONEME_TAB *ph_data = phoneme_tab[data];
+
+			if ((ph_data != NULL) && (ph_data->mnemonic == ph->mnemonic))
 				return true;
 
 			//  not an exact match, check for a vowel type (eg. #i )
@@ -826,7 +831,12 @@ void InterpretPhoneme(Translator *tr, int control, PHONEME_LIST *plist, PHONEME_
 					break;
 				}
 			} else if (instn2 == i_APPEND_IFNEXTVOWEL) {
-				if (phoneme_tab[plist[1].phcode]->type == phVOWEL)
+				// the next phoneme may not be in the current phoneme table (e.g.
+				// a phoneme from another table after a mid-clause phoneme-table
+				// switch); it cannot be shown to be a vowel, so don't append
+				PHONEME_TAB *ph_next = phoneme_tab[plist[1].phcode];
+
+				if ((ph_next != NULL) && (ph_next->type == phVOWEL))
 					phdata->pd_param[i_APPEND_PHONEME] = data;
 			} else if (instn2 == i_ADD_LENGTH) {
 				if (data & 0x80) {
@@ -1001,12 +1011,18 @@ void InterpretPhoneme(Translator *tr, int control, PHONEME_LIST *plist, PHONEME_
 	}
 }
 
-void InterpretPhoneme2(int phcode, PHONEME_DATA *phdata)
+void InterpretPhoneme2WithData(int phcode, PHONEME_TAB *ph, PHONEME_DATA *phdata)
 {
-	// Examine the program of a single isolated phoneme
+	// Examine the program of a single isolated phoneme. The caller may pass
+	// a resolved phoneme from an alternate table; the numeric code alone is
+	// table-local and is unsafe after the base table has been restored.
 	int ix;
 	PHONEME_LIST plist[4];
 	memset(plist, 0, sizeof(plist));
+	if (ph == NULL) {
+		memset(phdata, 0, sizeof(*phdata));
+		return;
+	}
 
 	for (ix = 0; ix < 4; ix++) {
 		plist[ix].phcode = phonPAUSE;
@@ -1014,8 +1030,23 @@ void InterpretPhoneme2(int phcode, PHONEME_DATA *phdata)
 	}
 
 	plist[1].phcode = phcode;
-	plist[1].ph = phoneme_tab[phcode];
+	plist[1].ph = ph;
 	plist[2].sourceix = 1;
 
 	InterpretPhoneme(NULL, 0, &plist[1], plist, phdata, NULL);
+}
+
+void InterpretPhoneme2(int phcode, PHONEME_DATA *phdata)
+{
+	InterpretPhoneme2WithData(phcode, phoneme_tab[phcode], phdata);
+}
+
+PHONEME_TAB *TonePhoneme(const PHONEME_LIST *plist)
+{
+	// Prefer the phoneme resolved while the word's own table was current.
+	// tone_ph on its own is table-local, so looking it up in phoneme_tab is
+	// only correct for words which did not switch language.
+	if (plist->tone_ph_data != NULL)
+		return plist->tone_ph_data;
+	return phoneme_tab[plist->tone_ph];
 }

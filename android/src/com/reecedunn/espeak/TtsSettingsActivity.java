@@ -18,12 +18,16 @@
 
 package com.reecedunn.espeak;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.util.Log;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.preference.CheckBoxPreference;
 import android.preference.ListPreference;
 import android.preference.MultiSelectListPreference;
 import android.preference.Preference;
@@ -57,6 +61,15 @@ public class TtsSettingsActivity extends PreferenceActivity {
 
     private static Context storageContext;
     private static final String TAG = TtsSettingsActivity.class.getSimpleName();
+
+    /**
+     * Identifies the combined voice-parameters preference. Nothing is stored
+     * under it -- the preference writes the individual VoiceSettings keys --
+     * but a Preference without a key cannot save its instance state, so its
+     * dialog would not survive a rotation.
+     */
+    private static final String PREF_VOICE_PARAMETERS = "espeak_voice_parameters";
+
     private static final java.util.HashMap<String, LangInfo> sLangInfo = new java.util.HashMap<String, LangInfo>();
 
     @Override
@@ -64,11 +77,6 @@ public class TtsSettingsActivity extends PreferenceActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N)
-        {
-            PreferenceManager preferenceManager = getPreferenceManager();
-            preferenceManager.setStorageDeviceProtected ();
-        }
         // Migrate old eyes-free settings to the new settings:
 
         storageContext = EspeakApp.getStorageContext();
@@ -109,17 +117,9 @@ public class TtsSettingsActivity extends PreferenceActivity {
 
         editor.commit();
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB)
-        {
-            getFragmentManager().beginTransaction().replace(
-                    android.R.id.content,
-                    new PrefsEspeakFragment()).commit();
-        }
-        else
-        {
-            addPreferencesFromResource(R.xml.preferences);
-            createPreferences(TtsSettingsActivity.this, getPreferenceScreen());
-        }
+        getFragmentManager().beginTransaction().replace(
+                android.R.id.content,
+                new PrefsEspeakFragment()).commit();
     }
 
     public static class PrefsEspeakFragment extends PreferenceFragment {
@@ -127,6 +127,15 @@ public class TtsSettingsActivity extends PreferenceActivity {
         public void onCreate(Bundle savedInstanceState) {
             super.onCreate(savedInstanceState);
 
+            // The fragment has its own PreferenceManager, separate from the
+            // activity's. Everything on this screen persists through it, so it
+            // must use the device-protected file that TtsService reads. A
+            // Preference left on the default credential-encrypted storage has
+            // no effect on speech, and its stray file is what #2536 copied
+            // over the real settings on every screen reader restart.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                getPreferenceManager().setStorageDeviceProtected();
+            }
             addPreferencesFromResource(R.xml.preferences);
             createPreferences(getActivity(), getPreferenceScreen());
         }
@@ -167,45 +176,89 @@ public class TtsSettingsActivity extends PreferenceActivity {
         return pref;
     }
 
-    private static Preference createSeekBarPreference(Context context, SpeechSynthesis.Parameter parameter, String key, int titleRes) {
-        final String title = context.getString(titleRes);
-        final int defaultValue = parameter.getDefaultValue();
-
-        final SeekBarPreference pref = new SeekBarPreference(context);
-        pref.setTitle(title);
-        pref.setDialogTitle(title);
-        pref.setKey(key);
-        pref.setOnPreferenceChangeListener(mOnPreferenceChanged);
+    private static Preference createUnicodeNormalizationPreference(Context context) {
+        final CheckBoxPreference pref = new CheckBoxPreference(context);
+        pref.setTitle(R.string.setting_unicode_normalization);
+        pref.setSummary(R.string.setting_unicode_normalization_summary);
+        pref.setKey(VoiceSettings.PREF_UNICODE_NORMALIZATION);
+        pref.setDefaultValue(true);
         pref.setPersistent(true);
+        return pref;
+    }
 
-        if (VoiceSettings.PREF_RATE.equals(key)) {
-            pref.enableRateBoost(VoiceSettings.PREF_RATE_BOOST);
-        }
-
+    /**
+     * Describes one voice parameter to {@link SeekBarPreference}: where its
+     * value lives, what it is called and how it reads.
+     */
+    private static SeekBarPreference.Parameter voiceParameter(Context context,
+                                                              SpeechSynthesis.Parameter parameter,
+                                                              String key, int titleRes) {
+        final String formatter;
         switch (parameter.getUnitType())
         {
             case Percentage:
-                pref.setFormatter(context.getString(R.string.formatter_percentage));
+                formatter = context.getString(R.string.formatter_percentage);
                 break;
             case WordsPerMinute:
-                pref.setFormatter(context.getString(R.string.formatter_wpm));
+                formatter = context.getString(R.string.formatter_wpm);
                 break;
             default:
                 throw new IllegalStateException("Unsupported unit type for the parameter.");
         }
 
-        pref.setMin(parameter.getMinValue());
-        pref.setMax(parameter.getMaxValue());
-        pref.setDefaultValue(defaultValue);
-
         final SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(storageContext);
-        final String prefString = prefs.getString(key, null);
-        if (prefString == null) {
-            pref.setProgress(defaultValue);
-        } else {
-            pref.setProgress(Integer.parseInt(prefString));
+        final String value = prefs.getString(key, null);
+        final int current = (value == null) ? parameter.getDefaultValue() : Integer.parseInt(value);
+
+        final SeekBarPreference.Parameter voiceParam = new SeekBarPreference.Parameter(
+                key,
+                context.getString(titleRes),
+                parameter.getMinValue(),
+                parameter.getMaxValue(),
+                parameter.getDefaultValue(),
+                current,
+                formatter);
+
+        if (VoiceSettings.PREF_RATE.equals(key)) {
+            voiceParam.enableRateBoost(prefs.getBoolean(VoiceSettings.PREF_RATE_BOOST, false));
         }
 
+        return voiceParam;
+    }
+
+    private static SeekBarPreference newSeekBarPreference(Context context, String key, String title) {
+        final SeekBarPreference pref = new SeekBarPreference(context);
+        pref.setTitle(title);
+        pref.setDialogTitle(title);
+        // Without a key, Preference.dispatchSaveInstanceState() skips the
+        // preference and an open dialog does not survive a rotation.
+        pref.setKey(key);
+        pref.setOnPreferenceChangeListener(mOnPreferenceChanged);
+        pref.setPersistent(true);
+        return pref;
+    }
+
+    /** A single voice parameter, edited in a dialog of its own. */
+    private static Preference createSeekBarPreference(Context context,
+                                                      SpeechSynthesis.Parameter parameter,
+                                                      String key, int titleRes) {
+        final SeekBarPreference pref = newSeekBarPreference(context, key, context.getString(titleRes));
+        pref.addParameter(voiceParameter(context, parameter, key, titleRes));
+        pref.setSummary(pref.buildSummary());
+        return pref;
+    }
+
+    /** All four voice parameters, edited together in one dialog. */
+    private static Preference createVoiceParamsPreference(Context context,
+                                                          SpeechSynthesis engine,
+                                                          int titleRes) {
+        final SeekBarPreference pref = newSeekBarPreference(context, PREF_VOICE_PARAMETERS,
+                context.getString(titleRes));
+        pref.addParameter(voiceParameter(context, engine.Rate, VoiceSettings.PREF_RATE, R.string.setting_default_rate));
+        pref.addParameter(voiceParameter(context, engine.Pitch, VoiceSettings.PREF_PITCH, R.string.setting_default_pitch));
+        pref.addParameter(voiceParameter(context, engine.PitchRange, VoiceSettings.PREF_PITCH_RANGE, R.string.espeak_pitch_range));
+        pref.addParameter(voiceParameter(context, engine.Volume, VoiceSettings.PREF_VOLUME, R.string.espeak_volume));
+        pref.setSummary(pref.buildSummary());
         return pref;
     }
 
@@ -293,7 +346,11 @@ public class TtsSettingsActivity extends PreferenceActivity {
         return info;
     }
 
-    private static void ensureLangInfoLoaded() {
+    // Synchronized because createPreferences() warms this from a worker thread
+    // while lookupLangInfo() may reach it from the main thread. Readers always
+    // come through here first, so they block until a build in progress
+    // finishes rather than observing a half-populated map.
+    private static synchronized void ensureLangInfoLoaded() {
         if (!sLangInfo.isEmpty() || storageContext == null) return;
         File root = new File(CheckVoiceData.getDataPath(storageContext), "lang");
         if (!root.exists()) return;
@@ -343,16 +400,80 @@ public class TtsSettingsActivity extends PreferenceActivity {
     }
 
     /**
+     * Gathers what the preference screen needs from the engine, then builds it.
+     *
+     * All of the expensive part used to run inline in onCreate(): constructing
+     * SpeechSynthesis initialises the native library (nativeCreate loads
+     * phondata and the dictionaries), getAvailableVoices() enumerates every
+     * voice over JNI, and building the supported-languages list walks the whole
+     * lang/ tree opening and parsing one file per voice. That is seconds of
+     * disk and JNI work on a cold start with a slow filesystem, on the thread
+     * that has to stay responsive -- the ANR risk reported in #2430.
+     *
+     * So it is gathered on a worker thread and the preferences are added when
+     * it lands. The Preference objects themselves are still built on the main
+     * thread, which is required: they bind to the hosting PreferenceGroup.
+     */
+    private static void createPreferences(final Context context, final PreferenceGroup group) {
+        final Context storage = storageContext;
+        final Handler handler = new Handler(Looper.getMainLooper());
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final boolean isWatch = context.getPackageManager()
+                        .hasSystemFeature(PackageManager.FEATURE_WATCH);
+
+                final SpeechSynthesis engine = new SpeechSynthesis(storage, null);
+                final List<Voice> voices = engine.getAvailableVoices();
+
+                // Warm the lang/ metadata cache here rather than leaving it to
+                // the first getVoiceLabel() call, which would drag the whole
+                // scan back onto the main thread. Skipped on Wear, where the
+                // supported-languages list is not built at all.
+                if (!isWatch) {
+                    ensureLangInfoLoaded();
+                }
+
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (isGone(context)) {
+                            return;
+                        }
+                        addPreferences(context, group, engine, voices, isWatch);
+                    }
+                });
+            }
+        }, "espeak-settings-load").start();
+    }
+
+    /**
+     * True once the hosting activity can no longer accept preference updates.
+     * The load outlives a screen the user backed straight out of, and adding
+     * preferences to a dead activity's group would leak it.
+     */
+    private static boolean isGone(Context context) {
+        if (!(context instanceof Activity)) {
+            return false;
+        }
+        final Activity activity = (Activity) context;
+        if (activity.isFinishing()) {
+            return true;
+        }
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1
+                && activity.isDestroyed();
+    }
+
+    /**
      * Since the "%s" summary is currently broken, this sets the preference
      * change listener for all {@link ListPreference} views to fill in the
      * summary with the current entry value.
      */
-    private static void createPreferences(Context context, PreferenceGroup group) {
-        SpeechSynthesis engine = new SpeechSynthesis(storageContext, null);
+    private static void addPreferences(Context context, PreferenceGroup group,
+                                       SpeechSynthesis engine, List<Voice> voices,
+                                       boolean isWatch) {
         VoiceSettings settings = new VoiceSettings(PreferenceManager.getDefaultSharedPreferences(storageContext), engine);
-        final List<Voice> voices = engine.getAvailableVoices();
-
-        boolean isWatch = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_WATCH);
 
         // The supported-languages multi-select and the file-picker-driven
         // voice import don't fit on a watch screen and have no meaningful
@@ -363,10 +484,20 @@ public class TtsSettingsActivity extends PreferenceActivity {
         }
         group.addPreference(createVoiceVariantPreference(context, settings, R.string.espeak_variant));
         group.addPreference(createSpeakPunctuationPreference(context, settings, R.string.espeak_speak_punctuation));
-        group.addPreference(createSeekBarPreference(context, engine.Rate, VoiceSettings.PREF_RATE, R.string.setting_default_rate));
-        group.addPreference(createSeekBarPreference(context, engine.Pitch, VoiceSettings.PREF_PITCH, R.string.setting_default_pitch));
-        group.addPreference(createSeekBarPreference(context, engine.PitchRange, VoiceSettings.PREF_PITCH_RANGE, R.string.espeak_pitch_range));
-        group.addPreference(createSeekBarPreference(context, engine.Volume, VoiceSettings.PREF_VOLUME, R.string.espeak_volume));
+        group.addPreference(createUnicodeNormalizationPreference(context));
+
+        if (isWatch) {
+            // One parameter per dialog on Wear. The rotating crown only
+            // delivers scroll events to the focused view and the watch has no
+            // way to move focus between sliders, so a combined dialog would
+            // leave every slider but one unreachable by the crown.
+            group.addPreference(createSeekBarPreference(context, engine.Rate, VoiceSettings.PREF_RATE, R.string.setting_default_rate));
+            group.addPreference(createSeekBarPreference(context, engine.Pitch, VoiceSettings.PREF_PITCH, R.string.setting_default_pitch));
+            group.addPreference(createSeekBarPreference(context, engine.PitchRange, VoiceSettings.PREF_PITCH_RANGE, R.string.espeak_pitch_range));
+            group.addPreference(createSeekBarPreference(context, engine.Volume, VoiceSettings.PREF_VOLUME, R.string.espeak_volume));
+        } else {
+            group.addPreference(createVoiceParamsPreference(context, engine, R.string.espeak_voice_settings));
+        }
     }
 
     private static final OnPreferenceChangeListener mOnPreferenceChanged =
@@ -383,10 +514,6 @@ public class TtsSettingsActivity extends PreferenceActivity {
                             if (index >= 0 && index < entries.length) {
                                 summary = entries[index].toString();
                             }
-                        } else if (preference instanceof SeekBarPreference) {
-                            final SeekBarPreference seekBarPreference = (SeekBarPreference) preference;
-                            String formatter = seekBarPreference.getFormatter();
-                            summary = String.format(formatter, (String)newValue);
                         } else {
                             summary = (String)newValue;
                         }

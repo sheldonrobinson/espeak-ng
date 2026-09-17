@@ -46,6 +46,11 @@ public class VoiceSettingsTest extends TextToSpeechTestCase
         public void onSynthDataComplete()
         {
         }
+
+        @Override
+        public void onSynthWordBoundary(int textPosition, int textLength, int markerInFrames)
+        {
+        }
     };
 
     // No Settings (New Install)
@@ -67,6 +72,7 @@ public class VoiceSettingsTest extends TextToSpeechTestCase
         assertThat(settings.getVolume(), is(synth.Volume.getDefaultValue()));
         assertThat(settings.getPunctuationLevel(), is(SpeechSynthesis.PUNCT_NONE));
         assertThat(settings.getPunctuationCharacters(), is(nullValue()));
+        assertThat(settings.isUnicodeNormalizationEnabled(), is(true));
 
         try {
             JSONObject json = settings.toJSON();
